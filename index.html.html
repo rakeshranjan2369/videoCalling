@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Video Calling App</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .video-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            justify-content: center;
+        }
+        .video-item {
+            width: 45%;
+            min-width: 300px;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            background-color: #4285f4;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #3367d6;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .connection-info {
+            margin-top: 20px;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status {
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+        .room-controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        input {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            width: 200px;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebRTC Video Calling App</h1>
+    
+    <div class="container">
+        <div class="room-controls">
+            <input type="text" id="roomId" placeholder="Enter room ID">
+            <button id="createBtn">Create Room</button>
+            <button id="joinBtn">Join Room</button>
+        </div>
+        
+        <div class="status" id="statusText">Not connected</div>
+        
+        <div class="video-container">
+            <div class="video-item">
+                <video id="localVideo" autoplay muted playsinline></video>
+            </div>
+            <div class="video-item">
+                <video id="remoteVideo" autoplay playsinline></video>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button id="muteBtn">Mute</button>
+            <button id="videoBtn">Turn Off Video</button>
+            <button id="hangupBtn" disabled>Hang Up</button>
+        </div>
+        
+        <div class="connection-info">
+            <h3>Connection Info</h3>
+            <p>Your Room ID: <span id="currentRoomId">-</span></p>
+            <p>Connection Status: <span id="connectionStatus">Disconnected</span></p>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let localStream;
+        let remoteStream;
+        let peerConnection;
+        let roomId;
+        let isInitiator = false;
+        let isMuted = false;
+        let isVideoOff = false;
+
+        // Signaling server simulation (in a real app, this would be a server)
+        // For demo purposes, we'll use localStorage to simulate signaling
+        const signaling = {
+            // Send a message to the peer
+            sendMessage: function(message) {
+                // In a real app, this would send to a server
+                // For demo, we'll just store in localStorage with a timestamp
+                const timestamp = new Date().getTime();
+                localStorage.setItem(`signaling_${roomId}_${timestamp}`, JSON.stringify(message));
+            },
+            
+            // Listen for messages
+            listenForMessages: function(callback) {
+                // Check for new messages every second
+                const interval = setInterval(() => {
+                    if (!roomId) return;
+                    
+                    // Get all keys in localStorage that match our room
+                    const keys = Object.keys(localStorage).filter(key => 
+                        key.startsWith(`signaling_${roomId}_`));
+                    
+                    // Sort by timestamp
+                    keys.sort();
+                    
+                    keys.forEach(key => {
+                        try {
+                            const message = JSON.parse(localStorage.getItem(key));
+                            // Process message
+                            callback(message);
+                            // Remove after processing
+                            localStorage.removeItem(key);
+                        } catch (e) {
+                            console.error('Error processing message', e);
+                        }
+                    });
+                }, 1000);
+                
+                return () => clearInterval(interval); // Return function to stop listening
+            }
+        };
+
+        // WebRTC configuration
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+            ]
+        };
+
+        // DOM elements
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const createBtn = document.getElementById('createBtn');
+        const joinBtn = document.getElementById('joinBtn');
+        const hangupBtn = document.getElementById('hangupBtn');
+        const muteBtn = document.getElementById('muteBtn');
+        const videoBtn = document.getElementById('videoBtn');
+        const roomIdInput = document.getElementById('roomId');
+        const currentRoomIdDisplay = document.getElementById('currentRoomId');
+        const connectionStatusDisplay = document.getElementById('connectionStatus');
+        const statusTextDisplay = document.getElementById('statusText');
+
+        // Initialize the application
+        async function init() {
+            try {
+                // Get user media
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: true, 
+                    audio: true 
+                });
+                
+                // Show local video
+                localVideo.srcObject = localStream;
+                
+                // Set up event listeners
+                createBtn.addEventListener('click', createRoom);
+                joinBtn.addEventListener('click', joinRoom);
+                hangupBtn.addEventListener('click', hangup);
+                muteBtn.addEventListener('click', toggleMute);
+                videoBtn.addEventListener('click', toggleVideo);
+                
+                statusTextDisplay.textContent = 'Camera and microphone are ready. Create or join a room to start a call.';
+            } catch (error) {
+                console.error('Error accessing media devices:', error);
+                statusTextDisplay.textContent = 'Failed to access camera and microphone. Please check permissions.';
+            }
+        }
+
+        // Create a new room
+        function createRoom() {
+            if (!roomIdInput.value.trim()) {
+                alert('Please enter a room ID');
+                return;
+            }
+            
+            roomId = roomIdInput.value.trim();
+            isInitiator = true;
+            
+            // Update UI
+            currentRoomIdDisplay.textContent = roomId;
+            statusTextDisplay.textContent = 'Room created. Waiting for someone to join...';
+            connectionStatusDisplay.textContent = 'Waiting for peer';
+            hangupBtn.disabled = false;
+            
+            // Start signaling
+            setupPeerConnection();
+            
+            // Start listening for messages
+            const stopListening = signaling.listenForMessages(handleSignalingMessage);
+        }
+
+        // Join an existing room
+        function joinRoom() {
+            if (!roomIdInput.value.trim()) {
+                alert('Please enter a room ID');
+                return;
+            }
+            
+            roomId = roomIdInput.value.trim();
+            isInitiator = false;
+            
+            // Update UI
+            currentRoomIdDisplay.textContent = roomId;
+            statusTextDisplay.textContent = 'Joining room...';
+            connectionStatusDisplay.textContent = 'Connecting';
+            hangupBtn.disabled = false;
+            
+            // Start signaling
+            setupPeerConnection();
+            
+            // Send join message to initiate connection
+            signaling.sendMessage({ type: 'join' });
+            
+            // Start listening for messages
+            const stopListening = signaling.listenForMessages(handleSignalingMessage);
+        }
+
+        // Set up the peer connection
+        function setupPeerConnection() {
+            // Create RTCPeerConnection
+            peerConnection = new RTCPeerConnection(configuration);
+            
+            // Add local stream tracks to peer connection
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+            
+            // Handle ICE candidates
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    // Send the ICE candidate to the peer
+                    signaling.sendMessage({
+                        type: 'candidate',
+                        candidate: event.candidate
+                    });
+                }
+            };
+            
+            // Handle connection state changes
+            peerConnection.onconnectionstatechange = () => {
+                connectionStatusDisplay.textContent = peerConnection.connectionState;
+                
+                if (peerConnection.connectionState === 'connected') {
+                    statusTextDisplay.textContent = 'Call connected!';
+                } else if (peerConnection.connectionState === 'disconnected' || 
+                           peerConnection.connectionState === 'failed') {
+                    statusTextDisplay.textContent = 'Call disconnected.';
+                }
+            };
+            
+            // Handle receiving remote stream
+            peerConnection.ontrack = event => {
+                if (remoteVideo.srcObject !== event.streams[0]) {
+                    remoteVideo.srcObject = event.streams[0];
+                    remoteStream = event.streams[0];
+                    statusTextDisplay.textContent = 'Remote stream received.';
+                }
+            };
+        }
+
+        // Handle signaling messages
+        async function handleSignalingMessage(message) {
+            if (!peerConnection) return;
+            
+            switch (message.type) {
+                case 'join':
+                    if (isInitiator) {
+                        // Someone wants to join our room, create an offer
+                        try {
+                            const offer = await peerConnection.createOffer();
+                            await peerConnection.setLocalDescription(offer);
+                            
+                            // Send the offer to the peer
+                            signaling.sendMessage({
+                                type: 'offer',
+                                sdp: peerConnection.localDescription
+                            });
+                            
+                            statusTextDisplay.textContent = 'Sent connection offer...';
+                        } catch (error) {
+                            console.error('Error creating offer:', error);
+                        }
+                    }
+                    break;
+                    
+                case 'offer':
+                    if (!isInitiator) {
+                        // We received an offer, set it as remote description
+                        try {
+                            await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
+                            
+                            // Create answer
+                            const answer = await peerConnection.createAnswer();
+                            await peerConnection.setLocalDescription(answer);
+                            
+                            // Send the answer to the peer
+                            signaling.sendMessage({
+                                type: 'answer',
+                                sdp: peerConnection.localDescription
+                            });
+                            
+                            statusTextDisplay.textContent = 'Received offer and sent answer...';
+                        } catch (error) {
+                            console.error('Error handling offer:', error);
+                        }
+                    }
+                    break;
+                    
+                case 'answer':
+                    if (isInitiator) {
+                        // We received an answer, set it as remote description
+                        try {
+                            await peerConnection.setRemoteDescription(new RTCSessionDescription(message.sdp));
+                            statusTextDisplay.textContent = 'Received answer, establishing connection...';
+                        } catch (error) {
+                            console.error('Error handling answer:', error);
+                        }
+                    }
+                    break;
+                    
+                case 'candidate':
+                    // Add ICE candidate
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                    } catch (error) {
+                        console.error('Error adding ICE candidate:', error);
+                    }
+                    break;
+                    
+                case 'hangup':
+                    // The other peer hung up
+                    hangup();
+                    statusTextDisplay.textContent = 'The other person ended the call.';
+                    break;
+            }
+        }
+
+        // Toggle audio mute
+        function toggleMute() {
+            if (!localStream) return;
+            
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = !track.enabled;
+                isMuted = !track.enabled;
+            });
+            
+            muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+        }
+
+        // Toggle video on/off
+        function toggleVideo() {
+            if (!localStream) return;
+            
+            localStream.getVideoTracks().forEach(track => {
+                track.enabled = !track.enabled;
+                isVideoOff = !track.enabled;
+            });
+            
+            videoBtn.textContent = isVideoOff ? 'Turn On Video' : 'Turn Off Video';
+        }
+
+        // Hang up the call
+        function hangup() {
+            // Send hangup message
+            if (roomId) {
+                signaling.sendMessage({ type: 'hangup' });
+            }
+            
+            // Close peer connection
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            // Reset UI
+            remoteVideo.srcObject = null;
+            currentRoomIdDisplay.textContent = '-';
+            connectionStatusDisplay.textContent = 'Disconnected';
+            statusTextDisplay.textContent = 'Call ended.';
+            hangupBtn.disabled = true;
+            roomId = null;
+        }
+
+        // Initialize app when page loads
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
